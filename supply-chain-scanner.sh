@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scan-supply-chain.sh — Supply Chain Malware Scanner
-# Threats: PolinRider, InvisibleFerret, Megalodon, BeaverTail, Glassworm, compromised npm packages
+# Threats: PolinRider, InvisibleFerret, Megalodon, compromised npm packages
 # Read-only: does NOT modify any files or system state
 # Safe: never prints credential or token values
 #
@@ -9,7 +9,7 @@
 
 set -uo pipefail
 
-VERSION="1.3.0"
+VERSION="1.2.0"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ EXCLUDE_DIRS="node_modules .next dist .git build .turbo .expo .cache Library .Tr
 # Known C2 indicators
 C2_IPS="166\.88\.54\.158|198\.105\.127\.210|23\.27\.202\.27|44\.206\.172\.239|195\.201\.194\.107|107\.189\.20\.115|216\.126\.237\.71|216\.126\.224\.220|95\.216\.26\.109|165\.140\.86\.52|66\.235\.175\.48|38\.92\.47\.157|45\.140\.184\.41|136\.0\.9\.8|154\.91\.0\.196|23\.27\.20\.143|85\.239\.62\.36|83\.168\.68\.219|166\.88\.4\.2|23\.27\.120\.142"
 
-C2_DOMAINS="trongrid|aptoslabs|bsc-dataseed|bsc-rpc\.publicnode|api\.telegram\.org|coingecko-liard\.vercel|jsonkeeper\.com|api-sub\.jrodacooker|api\.npoint\.io|jsonspack|nexafilm|deoft|pricesheet|mywalletsss|regioncheck\.xyz|aptos-mainnet\.nodereal"
+C2_DOMAINS="trongrid|aptoslabs|bsc-dataseed|bsc-rpc\.publicnode|api\.telegram\.org|coingecko-liard\.vercel|jsonkeeper\.com|api-sub\.jrodacooker|api\.npoint\.io|jsonspack|nexafilm|deoft|pricesheet|mywalletsss|regioncheck\.xyz"
 
 C2_VERCEL="default-configuration\.vercel|vscode-settings-bootstrap\.vercel|vscode-load-config\.vercel|260120\.vercel|coingecko-liard\.vercel|cloudflareinsights\.vercel|axioshealthcheck\.vercel|logkit-tau\.vercel|wallet-management-tg-bot\.vercel|polymarkettrading\.vercel|npmjs-doc-builder\.vercel|chalk-logger\.vercel|cloudflare-protection\.vercel|cloudflarefirewall\.vercel|cloudflareguard\.vercel|cloudflaresecurity\.vercel|cloudflareshield\.vercel|locate-my-ip\.vercel|vscode-config-settings\.vercel|vscode-extension-260120\.vercel|vscode-settings-config\.vercel|vscode-extensions-bootstrap\.vercel|davhub88\.vercel|codeviewer-three\.vercel|coreviewer\.vercel|vscode-helper171\.vercel|task-hrec\.vercel|vscode-bootstrapper\.vercel|vscode-production-setting\.vercel|vscode-toolkit-settings\.vercel|tailwind-version-4\.vercel|vscode-ext-git\.vercel|thopywork\.vercel|isvalid-regions\.vercel|ext-checkedin\.vercel|data-kappa\.vercel|apiscriptv3\.vercel|server-check-genimi\.vercel|server-genimi-check\.vercel"
 
@@ -50,8 +50,8 @@ else
   RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; DIM=''; NC=''
 fi
 
-TOTAL_CHECKS=33
-if [[ "$(uname)" == "Darwin" ]]; then TOTAL_CHECKS=35; fi
+TOTAL_CHECKS=28
+if [[ "$(uname)" == "Darwin" ]]; then TOTAL_CHECKS=30; fi
 CURRENT=0
 declare -a CHECK_NAMES=()
 declare -a CHECK_RESULTS=()
@@ -67,7 +67,6 @@ pass()   { printf "       ${GREEN}✅ %s${NC}\n" "$1"; }
 warn()   { printf "       ${YELLOW}⚠️  %s${NC}\n" "$1"; FINDINGS=$((FINDINGS + 1)); }
 fail()   { printf "       ${RED}🔴 %s${NC}\n" "$1"; FINDINGS=$((FINDINGS + 1)); }
 detail() { printf "       ${DIM}   %s${NC}\n" "$1"; }
-info()   { printf "       ${YELLOW}👀 %s${NC}\n" "$1"; }   # informational, not counted as a finding
 
 record() {
   CHECK_NAMES+=("$1")
@@ -109,24 +108,6 @@ build_grep_excludes() {
 }
 
 GREP_EXCLUDES=$(build_grep_excludes)
-
-# find prune expressions (arrays, safe for paths with spaces):
-#   FIND_PRUNE      — prunes EXCLUDE_DIRS plus Python venv/cache dirs
-#   FIND_PRUNE_NOGIT — same, but keeps .git so repositories can be discovered
-FIND_PRUNE=()
-FIND_PRUNE_NOGIT=()
-build_find_prune() {
-  local d
-  FIND_PRUNE=( -type d \( -name .venv -o -name venv -o -name __pycache__ )
-  FIND_PRUNE_NOGIT=( -type d \( -name .venv -o -name venv -o -name __pycache__ )
-  for d in $EXCLUDE_DIRS; do
-    FIND_PRUNE+=( -o -name "$d" )
-    [[ "$d" != ".git" ]] && FIND_PRUNE_NOGIT+=( -o -name "$d" )
-  done
-  FIND_PRUNE+=( \) -prune -o )
-  FIND_PRUNE_NOGIT+=( \) -prune -o )
-}
-build_find_prune
 
 # ─── Check functions ─────────────────────────────────────────────────────────
 
@@ -349,7 +330,7 @@ check_solana_c2() {
   local hits
   hits=$(grep -rl $GREP_EXCLUDES \
     --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
-    -E "@solana/web3|trongrid|wallet.*memo|fullnode\.mainnet\.aptoslabs|bsc-dataseed|aptos-mainnet\.nodereal" \
+    -E "@solana/web3|trongrid|wallet.*memo" \
     "${RESOLVED_DIRS[@]}" 2>/dev/null || true)
 
   if [[ -n "$hits" ]]; then
@@ -996,456 +977,6 @@ check_malicious_npm_accounts() {
   fi
 }
 
-# ─── v1.3 checks (ported from Operation-PolinRider polinrider_guard) ─────────
-
-# 29. PolinRider v2 version tags + BeaverTail stage-1 loader / decoder patterns
-check_beavertail_loader() {
-  header "PolinRider v2 tags & BeaverTail loader patterns"
-  [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "BeaverTail loader" "⏭️"; return; }
-
-  local critical_re='global\[.{0,3}_V.{0,3}\][[:space:]]*=[[:space:]]*.{0,3}8-(st[0-9]{1,3}|[0-9]{3,4})|eval[[:space:]]*\([[:space:]]*Buffer\.from[[:space:]]*\(|eval[[:space:]]*\([[:space:]]*atob[[:space:]]*\('
-  local decoder_re='String\.fromCharCode\([0-9]+(,[[:space:]]*[0-9]+){14,}|\.split\(.\)\.map.*\.charCodeAt.*\^'
-  local includes=(--include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' --include='*.jsx' --include='*.tsx')
-
-  local critical decoder status="✅"
-  critical=$(grep -rlE $GREP_EXCLUDES "${includes[@]}" "$critical_re" "${RESOLVED_DIRS[@]}" 2>/dev/null || true)
-  decoder=$(grep -rlE $GREP_EXCLUDES "${includes[@]}" "$decoder_re" "${RESOLVED_DIRS[@]}" 2>/dev/null || true)
-
-  if [[ -n "$critical" ]]; then
-    local count
-    count=$(echo "$critical" | wc -l | tr -d ' ')
-    fail "POLINRIDER V2 TAG / EVAL LOADER in $count file(s)"
-    echo "$critical" | head -20 | while IFS= read -r f; do detail "$f"; done
-    [[ $count -gt 20 ]] && detail "... and $((count - 20)) more"
-    detail "global['_V']='8-stNN' = PolinRider v2 tag; eval(Buffer.from|atob(...)) = BeaverTail stage-1"
-    status="🔴"
-  fi
-
-  if [[ -n "$decoder" ]]; then
-    local count
-    count=$(echo "$decoder" | wc -l | tr -d ' ')
-    warn "SHUFFLE-CIPHER DECODER pattern in $count file(s) — verify"
-    echo "$decoder" | head -10 | while IFS= read -r f; do detail "$f"; done
-    [[ $count -gt 10 ]] && detail "... and $((count - 10)) more"
-    detail "Long String.fromCharCode chains or split/map/charCodeAt XOR loops hide payloads"
-    [[ "$status" == "✅" ]] && status="⚠️"
-  fi
-
-  [[ "$status" == "✅" ]] && pass "No PolinRider v2 / BeaverTail loader patterns found"
-  record "BeaverTail loader" "$status"
-}
-
-# 30. Invisible Unicode characters hiding payloads (Glassworm)
-check_invisible_unicode() {
-  header "Invisible Unicode characters (Glassworm)"
-  [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "Invisible Unicode" "⏭️"; return; }
-  if ! command -v perl &>/dev/null; then
-    pass "perl not available — skipped"
-    record "Invisible Unicode" "⏭️"
-    return
-  fi
-
-  # Flags zero-width/bidi (U+200B-200F, U+202A-202E), invisible formatting (U+2060-206F),
-  # variation selectors (U+FE00-FE0F) and private-use (U+E000-F8FF).
-  # Normal emoji are ignored: a single variation selector or zero-width joiner directly after
-  # a visible non-ASCII character (e.g. ⚠️ ℹ️ ⤵️ 🕵️ 👨‍💻) or a digit keycap (1️⃣).
-  # Runs of hidden characters (how Glassworm stores payloads) are still reported.
-  # vendor/ (Composer dependencies) is skipped, like node_modules.
-  local perl_script
-  perl_script=$(cat <<'PERL'
-use strict; use warnings; use Encode ();
-for my $f (@ARGV) {
-  open(my $fh, "<:raw", $f) or next;
-  my $data = do { local $/; <$fh> }; close $fh;
-  next unless defined $data && length $data;
-  next if index(substr($data, 0, 4096), "\0") >= 0;
-  my $text = eval { Encode::decode("UTF-8", $data, Encode::FB_CROAK) };
-  next unless defined $text;
-  my ($ln, $count, $first) = (0, 0, "");
-  for my $line (split /\r\n|\n|\r/, $text) {
-    $ln++;
-    while ($line =~ /([\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FE00}-\x{FE0F}\x{E000}-\x{F8FF}])/g) {
-      my $cp = ord($1);
-      my $i = $-[1];
-      my $prev = $i > 0 ? substr($line, $i - 1, 1) : "";
-      my $next = $i < length($line) - 1 ? substr($line, $i + 1, 1) : "";
-      # "visible" = non-ASCII, not itself a hidden/format/private-use character
-      my $vis = qr/[^\x00-\x7F\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FE00}-\x{FE0F}\x{E000}-\x{F8FF}\p{Cf}]/;
-      if ($cp == 0x200D && $prev ne "" && $next ne "") {
-        next if ($prev =~ $vis || $prev =~ /[\x{FE0E}\x{FE0F}]/) && $next =~ $vis;
-      } elsif (($cp == 0xFE0E || $cp == 0xFE0F) && $prev ne "") {
-        next if $prev =~ $vis;
-        next if $prev =~ /[0-9#*]/ && $next eq "\x{20E3}";
-      }
-      $count++;
-      $first = sprintf("line %d col %d U+%04X", $ln, $i + 1, $cp) unless $first;
-    }
-  }
-  print "$count\t$first\t$f\n" if $count;
-}
-PERL
-)
-
-  local hits=""
-  local dir
-  for dir in "${RESOLVED_DIRS[@]}"; do
-    hits+=$(find "$dir" -maxdepth "$MAX_DEPTH" -type d -name vendor -prune -o "${FIND_PRUNE[@]}" -type f -size -2048k \( \
-      -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' \
-      -o -name '*.json' -o -name '*.py' -o -name '*.rb' -o -name '*.sh' -o -name '*.ps1' -o -name '*.bat' \
-      -o -name '*.php' -o -name '*.go' -o -name '*.rs' -o -name '*.java' -o -name '*.kt' -o -name '*.swift' \
-      -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cs' \
-      -o -name '*.css' -o -name '*.html' -o -name '*.sql' -o -name '*.yaml' -o -name '*.yml' \
-      -o -name '*.md' -o -name '*.txt' \) -print0 2>/dev/null | \
-      xargs -0 perl -e "$perl_script" 2>/dev/null || true)
-    hits+=$'\n'
-  done
-  hits=$(echo "$hits" | grep -v '^$' || true)
-
-  if [[ -n "$hits" ]]; then
-    local count
-    count=$(echo "$hits" | wc -l | tr -d ' ')
-    warn "INVISIBLE UNICODE in $count file(s)"
-    echo "$hits" | head -20 | while IFS=$'\t' read -r n first f; do
-      detail "$f ($n char(s), first at $first)"
-    done
-    [[ $count -gt 20 ]] && detail "... and $((count - 20)) more"
-    detail "Glassworm hides code in zero-width/variation-selector characters — inspect with: cat -v <file>"
-    detail "May be legitimate for i18n (bidi marks) or icon fonts (private-use) — verify manually"
-    record "Invisible Unicode" "⚠️"
-  else
-    pass "No suspicious invisible Unicode found"
-    record "Invisible Unicode" "✅"
-  fi
-}
-
-# 31. Script payloads disguised as binary assets (fonts/images/wasm)
-check_disguised_binaries() {
-  header "Script payloads disguised as fonts/images/wasm"
-  [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "Disguised binaries" "⏭️"; return; }
-  if ! command -v perl &>/dev/null; then
-    pass "perl not available — skipped"
-    record "Disguised binaries" "⏭️"
-    return
-  fi
-
-  # Reads the first 64 KB of each asset. Emits:
-  #   SCRIPT — wrong magic bytes, >75% printable, and contains script markers
-  #   IOC    — PolinRider marker / version tag present
-  #   C2     — blockchain dead-drop or known endpoint marker present
-  local perl_script
-  perl_script=$(cat <<'PERL'
-use strict; use warnings;
-my %magic = (
-  woff => ["wOFF"], woff2 => ["wOF2"], ttf => ["\x00\x01\x00\x00", "true", "typ1"],
-  otf => ["OTTO"], png => ["\x89PNG\r\n\x1a\n"], jpg => ["\xff\xd8\xff"], jpeg => ["\xff\xd8\xff"],
-  gif => ["GIF87a", "GIF89a"], ico => ["\x00\x00\x01\x00"], wasm => ["\x00asm"],
-);
-my $script_re = qr/(function\s*\(|=>\s*\{|require\s*\(|import\s+|eval\s*\(|global\s*\[|process\.|exec\(|subprocess\.|os\.system|Buffer\.from\s*\(|atob\s*\(|String\.fromCharCode\s*\(|var\s+_0x)/;
-my $c2_re = qr/(trongrid\.io|aptoslabs\.com|bsc-dataseed|solana|MemoSq4gq|aptos-mainnet\.nodereal)/i;
-my $ioc_re = qr/(rmcej.{0,5}otb|global\[.{0,3}_V.{0,3}\]\s*=\s*.{0,3}8-(st\d{1,3}|\d{3,4}))/s;
-for my $f (@ARGV) {
-  my ($ext) = $f =~ /\.([^.\/]+)$/;
-  next unless defined $ext;
-  $ext = lc $ext;
-  next unless $magic{$ext};
-  open(my $fh, "<:raw", $f) or next;
-  my $data = ""; read($fh, $data, 65536); close $fh;
-  next unless length $data;
-  my $valid = grep { substr($data, 0, length $_) eq $_ } @{ $magic{$ext} };
-  my $printable = () = $data =~ /[\t\n\r\x20-\x7e]/g;
-  my $ratio = $printable / length($data);
-  print "SCRIPT\t$f\n" if !$valid && $ratio > 0.75 && $data =~ $script_re;
-  print "IOC\t$f\n" if $data =~ $ioc_re;
-  print "C2\t$f\n" if $data =~ $c2_re;
-}
-PERL
-)
-
-  local hits=""
-  local dir
-  for dir in "${RESOLVED_DIRS[@]}"; do
-    hits+=$(find "$dir" -maxdepth "$MAX_DEPTH" "${FIND_PRUNE[@]}" -type f \( \
-      -iname '*.woff' -o -iname '*.woff2' -o -iname '*.ttf' -o -iname '*.otf' -o -iname '*.png' \
-      -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.ico' -o -iname '*.wasm' \) \
-      -print0 2>/dev/null | xargs -0 perl -e "$perl_script" 2>/dev/null || true)
-    hits+=$'\n'
-  done
-
-  local script_hits ioc_hits c2_hits status="✅"
-  script_hits=$(echo "$hits" | awk -F'\t' '$1=="SCRIPT"{print $2}')
-  ioc_hits=$(echo "$hits" | awk -F'\t' '$1=="IOC"{print $2}')
-  c2_hits=$(echo "$hits" | awk -F'\t' '$1=="C2"{print $2}')
-
-  if [[ -n "$script_hits" ]]; then
-    fail "SCRIPT CODE disguised as binary asset in $(echo "$script_hits" | wc -l | tr -d ' ') file(s)"
-    echo "$script_hits" | head -20 | while IFS= read -r f; do detail "$f"; done
-    detail "File has wrong magic bytes and contains JS/Python — PolinRider font vector"
-    status="🔴"
-  fi
-  if [[ -n "$ioc_hits" ]]; then
-    fail "POLINRIDER MARKER inside binary asset in $(echo "$ioc_hits" | wc -l | tr -d ' ') file(s)"
-    echo "$ioc_hits" | head -20 | while IFS= read -r f; do detail "$f"; done
-    status="🔴"
-  fi
-  if [[ -n "$c2_hits" ]]; then
-    warn "C2 / blockchain marker inside binary asset in $(echo "$c2_hits" | wc -l | tr -d ' ') file(s)"
-    echo "$c2_hits" | head -20 | while IFS= read -r f; do detail "$f"; done
-    detail "May be legitimate (e.g. a Solana logo's metadata) — verify manually"
-    [[ "$status" == "✅" ]] && status="⚠️"
-  fi
-
-  [[ "$status" == "✅" ]] && pass "No disguised script payloads found"
-  record "Disguised binaries" "$status"
-}
-
-# 32. VS Code tasks.json — hidden auto-run tasks and disguised payload execution (TasksJacker)
-check_vscode_autorun_tasks() {
-  header "VS Code tasks.json auto-run / disguised payloads"
-  [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "tasks.json auto-run" "⏭️"; return; }
-  if ! command -v python3 &>/dev/null; then
-    pass "python3 not available — skipped"
-    record "tasks.json auto-run" "⏭️"
-    return
-  fi
-
-  # tasks.json is JSONC: strip comments + trailing commas before parsing.
-  # Emits: PAYLOAD<TAB>file<TAB>label | HIDDEN<TAB>file<TAB>label | UNREADABLE<TAB>file<TAB>error
-  local py_script
-  py_script=$(cat <<'PY'
-import json, re, sys
-SUSPICIOUS = re.compile(r"\b(node|python|python3|bash|sh|pwsh|powershell)\b.*\.(woff2?|ttf|otf|png|jpg|jpeg|gif|ico|wasm)\b", re.I)
-
-def strip_jsonc(s):
-    out, i, n, in_str = [], 0, len(s), False
-    while i < n:
-        c = s[i]
-        if in_str:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(s[i + 1]); i += 2; continue
-            if c == '"':
-                in_str = False
-            i += 1; continue
-        if c == '"':
-            in_str = True; out.append(c); i += 1; continue
-        if s.startswith("//", i):
-            j = s.find("\n", i); i = n if j < 0 else j; continue
-        if s.startswith("/*", i):
-            j = s.find("*/", i + 2); i = n if j < 0 else j + 2; continue
-        out.append(c); i += 1
-    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
-
-def clean(v):
-    return str(v).replace("\t", " ").replace("\n", " ")[:120]
-
-for path in sys.argv[1:]:
-    try:
-        raw = open(path, encoding="utf-8").read()
-    except Exception as e:
-        print(f"UNREADABLE\t{path}\t{clean(e)}"); continue
-    try:
-        data = json.loads(strip_jsonc(raw))
-    except Exception as e:
-        if SUSPICIOUS.search(raw):
-            print(f"PAYLOAD\t{path}\t(unparsed file)")
-        else:
-            print(f"UNREADABLE\t{path}\t{clean(e)}")
-        continue
-    tasks = data.get("tasks", []) if isinstance(data, dict) else []
-    if not isinstance(tasks, list):
-        continue
-    for idx, task in enumerate(tasks):
-        if not isinstance(task, dict):
-            continue
-        ro = task.get("runOptions") if isinstance(task.get("runOptions"), dict) else {}
-        pres = task.get("presentation") if isinstance(task.get("presentation"), dict) else {}
-        label = clean(task.get("label", f"task #{idx}"))
-        args = task.get("args", [])
-        parts = [str(task.get("command", ""))] + ([str(a) for a in args] if isinstance(args, list) else [str(args)])
-        text = " ".join(parts)
-        if ro.get("runOn") == "folderOpen" and (pres.get("reveal") in ("never", "silent") or task.get("hide") is True):
-            print(f"HIDDEN\t{path}\t{label}")
-        if SUSPICIOUS.search(text):
-            print(f"PAYLOAD\t{path}\t{label}: {clean(text)}")
-PY
-)
-
-  local hits=""
-  local dir
-  for dir in "${RESOLVED_DIRS[@]}"; do
-    hits+=$(find "$dir" -maxdepth "$MAX_DEPTH" "${FIND_PRUNE[@]}" -type f -path '*/.vscode/tasks.json' \
-      -print0 2>/dev/null | xargs -0 python3 -c "$py_script" 2>/dev/null || true)
-    hits+=$'\n'
-  done
-
-  local payload hidden unreadable status="✅"
-  payload=$(echo "$hits" | awk -F'\t' '$1=="PAYLOAD"{print $2 " — " $3}')
-  hidden=$(echo "$hits" | awk -F'\t' '$1=="HIDDEN"{print $2 " — task: " $3}')
-  unreadable=$(echo "$hits" | awk -F'\t' '$1=="UNREADABLE"{print $2 " — " $3}')
-
-  if [[ -n "$payload" ]]; then
-    fail "tasks.json RUNS AN INTERPRETER ON A DISGUISED ASSET"
-    echo "$payload" | while IFS= read -r l; do detail "$l"; done
-    detail "e.g. 'node fonts/x.woff2' — TasksJacker + font payload vector"
-    status="🔴"
-  fi
-  if [[ -n "$hidden" ]]; then
-    warn "Hidden auto-run tasks (runOn: folderOpen + hidden output)"
-    echo "$hidden" | while IFS= read -r l; do detail "$l"; done
-    detail "Runs silently when the folder is opened — verify the command is expected"
-    [[ "$status" == "✅" ]] && status="⚠️"
-  fi
-  if [[ -n "$unreadable" ]]; then
-    echo "$unreadable" | while IFS= read -r l; do detail "Could not parse: $l"; done
-  fi
-
-  [[ "$status" == "✅" ]] && pass "No hidden auto-run or disguised-payload tasks found"
-  record "tasks.json auto-run" "$status"
-}
-
-# 33. Git history — malware on any branch, and commits with author/committer date skew
-#
-# Strong PolinRider markers only (low false-positive rate), checked in JS/TS files:
-#   rmcej%otb, global['_V']='8-..', global['!']='9-..', var _$_1e42=(function
-GIT_IOC='rmcej.{0,5}otb|global\[.{0,3}_V.{0,3}\][[:space:]]*=[[:space:]]*.{0,3}8-|global\[.!.\][[:space:]]*=[[:space:]]*.[0-9]+-|_\$_[a-f0-9]{4}=\(function'
-GIT_CODE_PATHS=('*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.tsx' ':!*node_modules/*' ':!*.min.js')
-
-# Print tab-separated rows from stdin as an aligned table with the given 4 headers.
-# Optional 5th field is a marker (e.g. 🔴) shown at the start of the row.
-git_table() {
-  local fmt="       %s %-34s %-34s %-32s %s\n"
-  local r b f s m
-  printf "\n${BOLD}${fmt}${NC}" "  " "$1" "$2" "$3" "$4"
-  printf "$fmt" "  " "----" "------" "----" "------"
-  while IFS=$'\t' read -r r b f s m; do
-    [[ -z "$r" ]] && continue
-    [[ -z "$m" ]] && m="  "
-    printf "$fmt" "$m" "$(git_trunc "$r" 34)" "$(git_trunc "$b" 34)" "$(git_trunc "$f" 32)" "$s"
-  done
-  printf "\n"
-}
-
-# Shorten long values from the left so the end of a path/branch stays visible.
-git_trunc() {
-  local s="$1" n="$2"
-  if [[ ${#s} -gt $n ]]; then echo "...${s: -$((n - 3))}"; else echo "$s"; fi
-}
-
-check_git_history() {
-  header "Git history: malware on branches + date skew (>24h)"
-  [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "Git history" "⏭️"; return; }
-  if ! command -v git &>/dev/null; then
-    pass "git not available — skipped"
-    record "Git history" "⏭️"
-    return
-  fi
-
-  printf "       ${DIM}Checking every branch of every repo — this may take a minute...${NC}\n"
-
-  # Rows are tab-separated: repo<TAB>branch<TAB>file<TAB>status
-  local active="" history="" skew_rows=""
-  local repo_count=0 branch_count=0
-  local dir gitpath repo short ref name f h n mal first skewed branches
-  local -a files
-
-  for dir in "${RESOLVED_DIRS[@]}"; do
-    while IFS= read -r gitpath; do
-      [[ -z "$gitpath" ]] && continue
-      repo=$(dirname "$gitpath")
-      short="${repo/#$HOME/~}"
-      repo_count=$((repo_count + 1))
-
-      # a) Malware in the latest commit of every local and remote branch
-      while IFS= read -r ref; do
-        [[ -z "$ref" || "$ref" == */HEAD ]] && continue
-        branch_count=$((branch_count + 1))
-        name="${ref#refs/heads/}"; name="${name#refs/remotes/}"
-        while IFS= read -r f; do
-          [[ -z "$f" ]] && continue
-          active+="$short"$'\t'"$name"$'\t'"${f#"$ref":}"$'\t'"ACTIVE"$'\t'"🔴"$'\n'
-        done < <(git -C "$repo" grep -lE "$GIT_IOC" "$ref" -- "${GIT_CODE_PATHS[@]}" 2>/dev/null)
-      done < <(git -C "$repo" for-each-ref --format='%(refname)' refs/heads refs/remotes 2>/dev/null)
-
-      # b) Commits with >24h author/committer date skew, and malware inside them
-      skewed=$(git -C "$repo" log --all --pretty=format:'%H %at %ct' 2>/dev/null | \
-        awk '{ d = $3 - $2; if (d < 0) d = -d; if (d > 86400) print $1 }')
-      [[ -z "$skewed" ]] && continue
-      n=$(echo "$skewed" | wc -l | tr -d ' ')
-      first=$(echo "$skewed" | head -1 | cut -c1-8)
-      mal=0
-      while IFS= read -r h; do
-        [[ -z "$h" ]] && continue
-        files=()
-        while IFS= read -r f; do
-          [[ -n "$f" ]] && files+=("$f")
-        done < <(git -C "$repo" diff-tree -r -m --no-commit-id --name-only --root "$h" 2>/dev/null | \
-          grep -E '\.(js|mjs|cjs|jsx|ts|tsx)$' | grep -v 'node_modules/' | sort -u)
-        [[ ${#files[@]} -eq 0 ]] && continue
-        local hit=0
-        while IFS= read -r f; do
-          [[ -z "$f" ]] && continue
-          f="${f#"$h":}"
-          hit=1
-          # Already reported as ACTIVE on a branch, or already listed from another commit? Skip.
-          if printf '%s' "$active$history" | awk -F'\t' -v r="$short" -v p="$f" \
-               '$1 == r && $3 == p { found = 1 } END { exit !found }'; then
-            continue
-          fi
-          branches=$(git -C "$repo" for-each-ref --contains "$h" --format='%(refname)' refs/heads refs/remotes 2>/dev/null | \
-            grep -v '/HEAD$' | sed -e 's#^refs/heads/##' -e 's#^refs/remotes/##')
-          name=$(echo "$branches" | head -1)
-          local others
-          others=$(echo "$branches" | grep -c . || true)
-          [[ -z "$name" ]] && name="(no branch)"
-          [[ "$others" -gt 1 ]] && name="$name (+$((others - 1)) more)"
-          history+="$short"$'\t'"$name"$'\t'"$f"$'\t'"REMOVED, in commit ${h:0:8}"$'\t'"🔴"$'\n'
-        done < <(git -C "$repo" grep -lE "$GIT_IOC" "$h" -- "${files[@]}" 2>/dev/null)
-        mal=$((mal + hit))
-      done <<< "$skewed"
-      local mark=""
-      [[ $mal -gt 0 ]] && mark="🔴"
-      skew_rows+="$short"$'\t'"$n"$'\t'"$mal"$'\t'"$first"$'\t'"$mark"$'\n'
-    done < <(find "$dir" -maxdepth "$MAX_DEPTH" "${FIND_PRUNE_NOGIT[@]}" -name .git -print -prune 2>/dev/null)
-  done
-
-  active=$(printf '%s' "$active" | grep -v '^$' || true)
-  history=$(printf '%s' "$history" | grep -v '^$' || true)
-  skew_rows=$(printf '%s' "$skew_rows" | grep -v '^$' || true)
-  local status="✅" count
-
-  if [[ -n "$active" ]]; then
-    count=$(echo "$active" | awk -F'\t' '{ print $1 "\t" $2 }' | sort -u | wc -l | tr -d ' ')
-    fail "MALWARE CODE ON $count BRANCH(ES) — checking out + running npm will execute it"
-    git_table "Repo" "Branch" "File" "Status" <<< "$active"
-    detail "Delete or clean these branches on the remote, and tell your security lead"
-    status="🔴"
-  fi
-
-  if [[ -n "$history" ]]; then
-    count=$(echo "$history" | wc -l | tr -d ' ')
-    warn "Malware in $count file(s) of old commits — removed from branches, still in git history"
-    git_table "Repo" "Branch" "File" "Status" <<< "$history"
-    detail "Harmless unless someone checks out that old commit. Rewriting history is a team decision."
-    [[ "$status" == "✅" ]] && status="⚠️"
-  fi
-
-  if [[ -n "$skew_rows" ]]; then
-    count=$(echo "$skew_rows" | wc -l | tr -d ' ')
-    info "$count of $repo_count repo(s) have commits with >24h author/committer date skew"
-    git_table "Repo" "Skewed commits" "With malware" "Example" <<< "$skew_rows"
-    detail "Skew without malware is usually a rebase, cherry-pick or late PR merge"
-    detail "Inspect with: git -C <repo> log --all --format='%h %ad | %cd %an %s' --date=iso"
-    [[ "$status" == "✅" ]] && status="👀"
-  fi
-
-  if [[ "$status" == "✅" ]]; then
-    pass "No malware in $branch_count branch(es) across $repo_count repo(s), and no date skew"
-  elif [[ -z "$active" ]]; then
-    pass "No malware in the latest code of $branch_count branch(es) across $repo_count repo(s)"
-  fi
-  record "Git history" "$status"
-}
-
 # ─── Deep checks (macOS only, slow) ──────────────────────────────────────────
 
 check_dns_c2() {
@@ -1562,7 +1093,7 @@ main() {
 
   printf "══════════════════════════════════════════════════════════════════\n"
   printf " Supply Chain Malware Scanner v%s\n" "$VERSION"
-  printf " PolinRider / InvisibleFerret / Megalodon / BeaverTail / Glassworm\n"
+  printf " PolinRider / InvisibleFerret / Megalodon\n"
   printf "══════════════════════════════════════════════════════════════════\n"
   printf "\n"
   printf " Platform:   %s %s\n" "$(uname -s)" "$(uname -m)"
@@ -1617,13 +1148,6 @@ main() {
   check_prototype_poisoning
   check_wasm_dropper
   check_malicious_npm_accounts
-
-  # New checks (v1.3 — Operation-PolinRider polinrider_guard)
-  check_beavertail_loader
-  check_invisible_unicode
-  check_disguised_binaries
-  check_vscode_autorun_tasks
-  check_git_history
 
   # Deep checks (macOS only, slow)
   if [[ "$(uname)" == "Darwin" ]]; then
