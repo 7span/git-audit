@@ -43,7 +43,7 @@ The check runs 33 tests (35 on Mac). It looks for:
 - Harmful code hidden inside your project files.
 - Harmful code hidden in invisible characters, or in fake font and image files.
 - VS Code tasks that secretly run code when you open a project.
-- Harmful code on any git branch, including branches you have not opened, and in old commits.
+- Git commits with odd dates, which can be a sign that harmful code was slipped into old history.
 - Known harmful npm packages and accounts.
 - Hidden programs that start by themselves, and changes to your SSH keys and git settings.
 - Connections to servers used by attackers.
@@ -63,5 +63,5 @@ The version number is shown at the top of the result.
 
 | Version | What changed |
 |---|---|
-| 1.3.0 | Added 5 tests, based on [Operation-PolinRider](https://github.com/richkazz/Operation-PolinRider): hidden loader code, invisible characters, fake font and image files, VS Code tasks that run by themselves, and harmful code on any git branch or in commits with odd dates. Also checks more attacker server addresses. |
+| 1.3.0 | Added 5 tests, based on [Operation-PolinRider](https://github.com/richkazz/Operation-PolinRider): hidden loader code, invisible characters, fake font and image files, VS Code tasks that run by themselves, and git commits with odd dates. Also checks more attacker server addresses. |
 | 1.2.0 | Added checks for more harmful npm packages and accounts, startup programs, injected SSH keys and hidden install code. |

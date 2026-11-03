@@ -1446,49 +1446,15 @@ PY
   record "tasks.json auto-run" "$status"
 }
 
-# 33. Git history — malware on any branch, and commits with author/committer date skew
-#
-# Strong PolinRider markers only (low false-positive rate), checked in JS/TS files:
-#   rmcej%otb, global['_V']='8-..', global['!']='9-..', var _$_1e42=(function
-GIT_IOC='rmcej.{0,5}otb|global\[.{0,3}_V.{0,3}\][[:space:]]*=[[:space:]]*.{0,3}8-|global\[.!.\][[:space:]]*=[[:space:]]*.[0-9]+-|_\$_[a-f0-9]{4}=\(function'
-GIT_CODE_PATHS=('*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.tsx')
-# node_modules and minified files are filtered from git output afterwards, instead of with
-# ":!" exclude pathspecs (Git Bash can rewrite arguments that look like paths).
-GIT_SKIP_RE='(^|/)node_modules/|\.min\.js$'
-
-# git grep for GIT_IOC in one commit/ref; prints matching file paths without the "<rev>:" prefix.
-git_ioc_files() {
-  local repo="$1" rev="$2" f
-  git -C "$repo" -c core.quotePath=false grep -lE "$GIT_IOC" "$rev" -- "${GIT_CODE_PATHS[@]}" 2>/dev/null | tr -d '\r' | \
-    while IFS= read -r f; do
-      f="${f#"$rev":}"
-      [[ -n "$f" ]] && printf '%s\n' "$f"
-    done | grep -vE "$GIT_SKIP_RE" || true
-}
-
-# Print tab-separated rows from stdin as an aligned table with the given 4 headers.
-# Optional 5th field is a marker (e.g. 🔴) shown at the start of the row.
-git_table() {
-  local fmt="       %s %-34s %-34s %-32s %s\n"
-  local r b f s m
-  printf "\n${BOLD}${fmt}${NC}" "  " "$1" "$2" "$3" "$4"
-  printf "$fmt" "  " "----" "------" "----" "------"
-  while IFS=$'\t' read -r r b f s m; do
-    [[ -z "$r" ]] && continue
-    [[ -z "$m" ]] && m="  "
-    printf "$fmt" "$m" "$(git_trunc "$r" 34)" "$(git_trunc "$b" 34)" "$(git_trunc "$f" 32)" "$s"
-  done
-  printf "\n"
-}
-
-# Shorten long values from the left so the end of a path/branch stays visible.
-git_trunc() {
-  local s="$1" n="$2"
-  if [[ ${#s} -gt $n ]]; then echo "...${s: -$((n - 3))}"; else echo "$s"; fi
-}
+# 33. Git history — commits with author/committer date skew
+# Same check as Operation-PolinRider scripts/scan-git-dates.py (src/polinrider_guard/git_dates.py):
+# run "git log --all" and report commits whose author and committer dates differ by more than
+# GIT_SKEW_HOURS. Informational only (👀): never counted as a finding. A failed "git log" is
+# listed too, so a repo git refuses to open is not silently shown as clean.
+GIT_SKEW_HOURS=24
 
 check_git_history() {
-  header "Git history: malware on branches + date skew (>24h)"
+  header "Git history: author/committer date skew (>${GIT_SKEW_HOURS}h)"
   [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "Git history" "⏭️"; return; }
   if ! command -v git &>/dev/null; then
     pass "git not available — skipped"
@@ -1496,136 +1462,49 @@ check_git_history() {
     return
   fi
 
-  printf "       ${DIM}Checking every branch of every repo — this may take a minute...${NC}\n"
-
-  # Rows are tab-separated: repo<TAB>branch<TAB>file<TAB>status
-  local active="" history="" skew_rows="" unreadable=""
-  local repo_count=0 branch_count=0
-  local dir gitpath repo short ref name f h n mal first skewed branches changed err
-  local tilde='~'
+  local dir gitpath repo short out skewed n
+  local tilde='~' repo_count=0 found=0 failed=0
 
   for dir in "${RESOLVED_DIRS[@]}"; do
     while IFS= read -r gitpath; do
       [[ -z "$gitpath" ]] && continue
       repo=$(dirname "$gitpath")
-      # $tilde: a literal ~ in the replacement is expanded to $HOME by bash 4.3+ (Git Bash, Linux)
       short="${repo/#"$HOME"/$tilde}"
       repo_count=$((repo_count + 1))
 
-      # git refuses repos it thinks belong to another user ("dubious ownership"): common on
-      # Windows for other drives, network shares and WSL clones. Report instead of passing.
-      if ! err=$(git -C "$repo" rev-parse --git-dir 2>&1 >/dev/null); then
-        err=$(echo "$err" | tr -d '\r' | grep -m1 -E '^(fatal|error):' || echo "$err" | head -1)
-        unreadable+="$short"$'\t'"$repo"$'\t'"$err"$'\n'
+      # hash, author, author time, committer time, author date, committer date, subject
+      if ! out=$(git -C "$repo" log --all --pretty=format:'%H%x09%an%x09%at%x09%ct%x09%aI%x09%cI%x09%s' 2>&1); then
+        info "git log failed: $short"
+        detail "$(echo "$out" | tr -d '\r' | head -1)"
+        failed=$((failed + 1))
         continue
       fi
 
-      # a) Malware in the latest commit of every local and remote branch
-      while IFS= read -r ref; do
-        [[ -z "$ref" || "$ref" == */HEAD ]] && continue
-        branch_count=$((branch_count + 1))
-        name="${ref#refs/heads/}"; name="${name#refs/remotes/}"
-        while IFS= read -r f; do
-          [[ -z "$f" ]] && continue
-          active+="$short"$'\t'"$name"$'\t'"$f"$'\t'"ACTIVE"$'\t'"🔴"$'\n'
-        done < <(git_ioc_files "$repo" "$ref")
-      done < <(git -C "$repo" for-each-ref --format='%(refname)' refs/heads refs/remotes 2>/dev/null | tr -d '\r')
-
-      # b) Commits with >24h author/committer date skew, and malware inside them
-      skewed=$(git -C "$repo" log --all --pretty=format:'%H %at %ct' 2>/dev/null | tr -d '\r' | \
-        awk '{ d = $3 - $2; if (d < 0) d = -d; if (d > 86400) print $1 }')
+      skewed=$(echo "$out" | tr -d '\r' | awk -F'\t' -v limit=$((GIT_SKEW_HOURS * 3600)) '
+        NF >= 7 {
+          d = $4 - $3; if (d < 0) d = -d
+          if (d > limit) printf "%s  %s -> %s  (%.1fh)  %s: %s\n", substr($1, 1, 12), $5, $6, d / 3600, $2, $7
+        }')
       [[ -z "$skewed" ]] && continue
+
       n=$(echo "$skewed" | wc -l | tr -d ' ')
-      first=$(echo "$skewed" | head -1 | cut -c1-8)
-      mal=0
-      while IFS= read -r h; do
-        [[ -z "$h" ]] && continue
-        # JS/TS files changed by this commit (newline-separated, used as a filter below)
-        changed=$(git -C "$repo" -c core.quotePath=false diff-tree -r -m --no-commit-id --name-only --root "$h" 2>/dev/null | \
-          tr -d '\r' | grep -E '\.(js|mjs|cjs|jsx|ts|tsx)$' | grep -vE "$GIT_SKIP_RE" | sort -u || true)
-        [[ -z "$changed" ]] && continue
-        local hit=0
-        while IFS= read -r f; do
-          [[ -z "$f" ]] && continue
-          hit=1
-          # Already reported as ACTIVE on a branch, or already listed from another commit? Skip.
-          if printf '%s' "$active$history" | awk -F'\t' -v r="$short" -v p="$f" \
-               '$1 == r && $3 == p { found = 1 } END { exit !found }'; then
-            continue
-          fi
-          branches=$(git -C "$repo" for-each-ref --contains "$h" --format='%(refname)' refs/heads refs/remotes 2>/dev/null | \
-            tr -d '\r' | grep -v '/HEAD$' | sed -e 's#^refs/heads/##' -e 's#^refs/remotes/##')
-          name=$(echo "$branches" | head -1)
-          local others
-          others=$(echo "$branches" | grep -c . || true)
-          [[ -z "$name" ]] && name="(no branch)"
-          [[ "$others" -gt 1 ]] && name="$name (+$((others - 1)) more)"
-          history+="$short"$'\t'"$name"$'\t'"$f"$'\t'"REMOVED, in commit ${h:0:8}"$'\t'"🔴"$'\n'
-        # xargs splits long file lists into several git calls (Windows caps a command line at ~32 KB)
-        done < <(printf '%s\n' "$changed" | tr '\n' '\0' | \
-          xargs -0 git -C "$repo" -c core.quotePath=false --literal-pathspecs grep -lE "$GIT_IOC" "$h" -- 2>/dev/null | tr -d '\r' | \
-          while IFS= read -r f; do printf '%s\n' "${f#"$h":}"; done)
-        mal=$((mal + hit))
-      done <<< "$skewed"
-      local mark=""
-      [[ $mal -gt 0 ]] && mark="🔴"
-      skew_rows+="$short"$'\t'"$n"$'\t'"$mal"$'\t'"$first"$'\t'"$mark"$'\n'
+      info "$short — $n commit(s) with author/committer date skew > ${GIT_SKEW_HOURS}h"
+      echo "$skewed" | head -10 | while IFS= read -r line; do detail "$line"; done
+      [[ $n -gt 10 ]] && detail "... and $((n - 10)) more"
+      found=$((found + 1))
     done < <(find "$dir" -maxdepth "$MAX_DEPTH" "${FIND_PRUNE_NOGIT[@]}" -name .git -print -prune 2>/dev/null)
   done
 
-  active=$(printf '%s' "$active" | grep -v '^$' || true)
-  history=$(printf '%s' "$history" | grep -v '^$' || true)
-  skew_rows=$(printf '%s' "$skew_rows" | grep -v '^$' || true)
-  unreadable=$(printf '%s' "$unreadable" | grep -v '^$' || true)
-  local status="✅" count skipped=0 r p e
-  [[ -n "$unreadable" ]] && skipped=$(echo "$unreadable" | wc -l | tr -d ' ')
-  repo_count=$((repo_count - skipped))   # repos actually scanned
-
-  if [[ -n "$unreadable" ]]; then
-    warn "COULD NOT SCAN $skipped repo(s) — git refused to open them, so malware there would be missed"
-    while IFS=$'\t' read -r r p e; do
-      detail "$r"
-      detail "    $e"
-    done <<< "$unreadable"
-    detail "Usually 'dubious ownership': the folder belongs to another user (other drive, network share, WSL, admin)."
-    detail "If you trust the repo, allow it and run the scan again:"
-    while IFS=$'\t' read -r r p e; do
-      detail "    git config --global --add safe.directory \"$p\""
-    done <<< "$unreadable"
-    status="⚠️"
+  if [[ $found -gt 0 || $failed -gt 0 ]]; then
+    if [[ $found -gt 0 ]]; then
+      detail "For information only. Usually a rebase, cherry-pick or late merge — check by hand if unexpected."
+      detail "Inspect with: git -C <repo> log --all --format='%h %ad | %cd %an %s' --date=iso"
+    fi
+    record "Git history" "👀"
+  else
+    pass "No commits with >${GIT_SKEW_HOURS}h date skew in $repo_count repo(s)"
+    record "Git history" "✅"
   fi
-
-  if [[ -n "$active" ]]; then
-    count=$(echo "$active" | awk -F'\t' '{ print $1 "\t" $2 }' | sort -u | wc -l | tr -d ' ')
-    fail "MALWARE CODE ON $count BRANCH(ES) — checking out + running npm will execute it"
-    git_table "Repo" "Branch" "File" "Status" <<< "$active"
-    detail "Delete or clean these branches on the remote, and tell your security lead"
-    status="🔴"
-  fi
-
-  if [[ -n "$history" ]]; then
-    count=$(echo "$history" | wc -l | tr -d ' ')
-    warn "Malware in $count file(s) of old commits — removed from branches, still in git history"
-    git_table "Repo" "Branch" "File" "Status" <<< "$history"
-    detail "Harmless unless someone checks out that old commit. Rewriting history is a team decision."
-    [[ "$status" == "✅" ]] && status="⚠️"
-  fi
-
-  if [[ -n "$skew_rows" ]]; then
-    count=$(echo "$skew_rows" | wc -l | tr -d ' ')
-    info "$count of $repo_count repo(s) have commits with >24h author/committer date skew"
-    git_table "Repo" "Skewed commits" "With malware" "Example" <<< "$skew_rows"
-    detail "Skew without malware is usually a rebase, cherry-pick or late PR merge"
-    detail "Inspect with: git -C <repo> log --all --format='%h %ad | %cd %an %s' --date=iso"
-    [[ "$status" == "✅" ]] && status="👀"
-  fi
-
-  if [[ "$status" == "✅" ]]; then
-    pass "No malware in $branch_count branch(es) across $repo_count repo(s), and no date skew"
-  elif [[ -z "$active" && $repo_count -gt 0 ]]; then
-    pass "No malware in the latest code of $branch_count branch(es) across $repo_count repo(s)"
-  fi
-  record "Git history" "$status"
 }
 
 # ─── Deep checks (macOS only, slow) ──────────────────────────────────────────
