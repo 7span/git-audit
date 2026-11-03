@@ -1,6 +1,6 @@
-# PollinRider Scanning Code built for security checkup on your computer.
+# PolinRider Scanner
 
-It only reads. It never changes or deletes anything on your computer.
+PolinRider scanning code built for a security checkup on your computer. It only reads. It never changes or deletes anything on your computer.
 
 ## How to run it
 
