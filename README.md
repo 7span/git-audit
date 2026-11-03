@@ -4,7 +4,9 @@ A quick check that looks for harmful software on your work computer. It only rea
 
 ## How to run it
 
-1. Open the **Terminal** app.
+1. Open the right app:
+   - **Mac or Linux:** open the **Terminal** app.
+   - **Windows:** open **Git Bash**. It comes with [Git for Windows](https://git-scm.com/download/win). Do not use PowerShell or Command Prompt.
 2. Paste this line, then press Enter:
 
 ```
@@ -27,7 +29,9 @@ Look at the last lines.
 
 ## Good to know
 
-- Works on Mac and Linux.
+- Works on Mac, Linux and Windows (in Git Bash).
+- On Windows, the check on VS Code tasks needs [Python 3](https://www.python.org/downloads/). Without it, that test is skipped.
+- If the result says **COULD NOT SCAN** for a project folder, git did not trust that folder. The result shows the line to run to allow it. Run that line only if the folder is yours, then run the check again.
 - It needs an internet connection.
 - Run it once every day.
 
