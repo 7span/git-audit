@@ -31,7 +31,7 @@ Look at the last lines.
 
 - Works on Mac, Linux and Windows (in Git Bash).
 - On Windows, the check on VS Code tasks needs [Python 3](https://www.python.org/downloads/). Without it, that test is skipped.
-- If the result says **COULD NOT SCAN** for a project folder, git did not trust that folder. The result shows the line to run to allow it. Run that line only if the folder is yours, then run the check again.
+- If the git history test says **git log failed** for a project folder, git did not trust that folder, so its history was not checked. If the folder is yours, run `git config --global --add safe.directory "<folder>"`, then run the check again.
 - It needs an internet connection.
 - Run it once every day.
 
@@ -56,6 +56,49 @@ Each test shows one of these marks:
 | ⚠️ | Looks unusual. It may be harmless, so check it. |
 | 🔴 | Harmful software found. Follow the **FINDING(S)** steps above. |
 | 👀 | For your information only. Look for anything you don't recognise. |
+
+## Reading the git history result
+
+The **Git history** test lists commits where the code was written more than one day before it was added to the branch. It is for your information only (👀). It never turns the result into **FINDING(S)**.
+
+Every git commit has two dates:
+
+- **Author date:** when the code was written.
+- **Committer date:** when the code was added to the branch.
+
+Example:
+
+```
+👀 ~/projects/my-app — 12 commit(s) with author/committer date skew > 24h
+   a1b2c3d4e5f6  2026-07-25T23:22:51+05:30 -> 2026-07-31T13:01:07+05:30  (133.6h)  Jane Doe: Add chat room API
+```
+
+| Part | Meaning |
+|---|---|
+| `a1b2c3d4e5f6` | The commit ID |
+| `2026-07-25 23:22` | Author date: when Jane wrote the change |
+| `2026-07-31 13:01` | Committer date: when it was added to the branch |
+| `(133.6h)` | The gap between the two dates: about 5.5 days |
+| `Jane Doe: Add chat room API` | Who wrote it, and the commit message |
+
+The list shows up to 10 commits per project. "... and N more" means there are more.
+
+**Is it a problem?** Usually not. A gap appears when someone rebases, cherry-picks or merges older work. A clear sign of this is many commits with exactly the same committer date and time. That means they were all added in one go.
+
+Attackers sometimes give their commit an old date, so it looks like old, trusted code. Check a commit by hand if:
+
+- You don't recognise the author.
+- The message doesn't match the work on the project.
+- One commit has a very large gap, such as months or years.
+- It changes files like `tailwind.config.js`, `postcss.config.js`, `next.config.js`, font files or `.vscode/tasks.json`.
+
+To see what a commit changed, run this with your project folder and the commit ID:
+
+```
+git -C ~/projects/my-app show --stat a1b2c3d4e5f6
+```
+
+If the commit looks harmful, follow the **FINDING(S)** steps above.
 
 ## Versions
 
