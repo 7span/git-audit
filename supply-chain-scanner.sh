@@ -9,7 +9,7 @@
 
 set -uo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -17,7 +17,51 @@ DEFAULT_SCAN_DIRS="$HOME"
 SCAN_DIRS="${SCAN_DIRS:-$DEFAULT_SCAN_DIRS}"
 MAX_DEPTH=6
 
-EXCLUDE_DIRS="node_modules .next dist .git build .turbo .expo .cache Library .Trash .local .nvm .cargo .rustup .docker .colima .orbstack .lima .cache go .gradle .m2 .npm .pnpm-store .yarn .bun Pictures Music Movies Applications"
+EXCLUDE_DIRS="node_modules .next dist .git build .turbo .expo .cache Library .Trash .local .nvm .cargo .rustup .docker .colima .orbstack .lima .cache go .gradle .m2 .npm .pnpm-store .yarn .bun Pictures Music Movies Applications AppData"
+
+# ─── Platform detection ──────────────────────────────────────────────────────
+# macOS (BSD tools, bash 3.2), Linux/WSL (GNU tools), Windows (Git Bash / MSYS2 / Cygwin)
+
+IS_MAC=false; IS_LINUX=false; IS_WINDOWS=false
+case "$(uname -s)" in
+  Darwin) IS_MAC=true ;;
+  MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;;
+  *) IS_LINUX=true ;;
+esac
+[[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* || "${OSTYPE:-}" == win32* ]] && { IS_WINDOWS=true; IS_LINUX=false; }
+
+# Temp directories where payloads drop files (/tmp, macOS $TMPDIR, Windows %TEMP%)
+TEMP_DIRS=()
+for _t in /tmp "${TMPDIR:-}" "${TEMP:-}" "${TMP:-}"; do
+  _t="${_t%/}"
+  [[ -z "$_t" || ! -d "$_t" ]] && continue
+  _dup=false
+  for _e in ${TEMP_DIRS[@]+"${TEMP_DIRS[@]}"}; do [[ "$_e" == "$_t" ]] && _dup=true; done
+  $_dup || TEMP_DIRS+=("$_t")
+done
+unset _t _e _dup
+
+# Working Python interpreter. On Windows, "python3" is often a Microsoft Store stub that
+# exists on PATH but does nothing, so actually run it.
+PYTHON=""
+for _p in python3 python; do
+  if command -v "$_p" &>/dev/null && "$_p" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' &>/dev/null; then
+    PYTHON="$_p"; break
+  fi
+done
+unset _p
+
+# List running processes with full command lines, one per line.
+# Git Bash's ps only shows its own MSYS processes, so Windows asks PowerShell instead.
+list_processes() {
+  if $IS_WINDOWS; then
+    powershell.exe -NoProfile -NonInteractive -Command \
+      'Get-CimInstance Win32_Process | ForEach-Object { "{0} {1} {2}" -f $_.ProcessId, $_.Name, $_.CommandLine }' \
+      2>/dev/null | tr -d '\r'
+  else
+    ps aux 2>/dev/null
+  fi
+}
 
 # Known C2 indicators
 C2_IPS="166\.88\.54\.158|198\.105\.127\.210|23\.27\.202\.27|44\.206\.172\.239|195\.201\.194\.107|107\.189\.20\.115|216\.126\.237\.71|216\.126\.224\.220|95\.216\.26\.109|165\.140\.86\.52|66\.235\.175\.48|38\.92\.47\.157|45\.140\.184\.41|136\.0\.9\.8|154\.91\.0\.196|23\.27\.20\.143|85\.239\.62\.36|83\.168\.68\.219|166\.88\.4\.2|23\.27\.120\.142"
@@ -133,10 +177,16 @@ build_find_prune
 # 1. Lock file — direct evidence of payload execution
 check_lock_file() {
   header "Lock file (payload execution marker)"
-  local lockfile="/tmp/tmp7A863DD1.tmp"
-  if [[ -f "$lockfile" ]]; then
-    fail "LOCK FILE EXISTS at $lockfile — payload executed on this machine"
-    detail "$(ls -la "$lockfile")"
+  local lockfile found=0 t
+  for t in "${TEMP_DIRS[@]}"; do
+    lockfile="$t/tmp7A863DD1.tmp"
+    if [[ -f "$lockfile" ]]; then
+      fail "LOCK FILE EXISTS at $lockfile — payload executed on this machine"
+      detail "$(ls -la "$lockfile")"
+      found=1
+    fi
+  done
+  if [[ $found -gt 0 ]]; then
     record "Lock file" "🔴"
   else
     pass "Not found"
@@ -149,7 +199,16 @@ check_credential_dumps() {
   header "Credential dumps (~/.npm staging)"
   local found=0
   local files
-  files=$(find "$HOME/.npm" \( \
+  # npm's cache is ~/.npm on macOS/Linux and %LOCALAPPDATA%\npm-cache on Windows
+  local -a npm_dirs=()
+  [[ -d "$HOME/.npm" ]] && npm_dirs+=("$HOME/.npm")
+  if $IS_WINDOWS && [[ -n "${LOCALAPPDATA:-}" ]]; then
+    local lad
+    lad=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null || echo "$LOCALAPPDATA")
+    [[ -d "$lad/npm-cache" ]] && npm_dirs+=("$lad/npm-cache")
+  fi
+  [[ ${#npm_dirs[@]} -eq 0 ]] && { pass "No npm cache directory"; record "Credential dumps" "✅"; return; }
+  files=$(find "${npm_dirs[@]}" \( \
     -name "_credentials.json" -o \
     -name "_sysenv.json" -o \
     -name "_sysenv.env" -o \
@@ -174,8 +233,18 @@ check_credential_dumps() {
 # 3. Active network connections to known C2
 check_network_c2() {
   header "Active C2 network connections"
-  local hits
-  hits=$(netstat -an 2>/dev/null | grep -iE "$C2_IPS" || true)
+  local hits conns
+  # netstat exists on macOS and Windows; many Linux distros only ship ss
+  if command -v netstat &>/dev/null; then
+    conns=$(netstat -an 2>/dev/null | tr -d '\r')
+  elif command -v ss &>/dev/null; then
+    conns=$(ss -tuna 2>/dev/null)
+  else
+    pass "netstat/ss not available — skipped"
+    record "C2 connections" "⏭️"
+    return
+  fi
+  hits=$(echo "$conns" | grep -iE "$C2_IPS" || true)
   if [[ -n "$hits" ]]; then
     fail "ACTIVE CONNECTION TO C2 SERVER"
     echo "$hits" | while IFS= read -r line; do detail "$line"; done
@@ -190,7 +259,7 @@ check_network_c2() {
 check_invisibleferret() {
   header "InvisibleFerret RAT processes"
   local hits
-  hits=$(ps aux 2>/dev/null | grep -iE "__DAEMONIZED|cat\.py" | grep -v grep || true)
+  hits=$(list_processes | grep -iE "__DAEMONIZED|cat\.py" | grep -v grep || true)
   if [[ -n "$hits" ]]; then
     fail "INVISIBLEFERRET PROCESS DETECTED"
     echo "$hits" | while IFS= read -r line; do detail "$line"; done
@@ -417,21 +486,39 @@ check_postinstall_scripts() {
   header "Suspicious postinstall/preinstall scripts"
   [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "postinstall" "⏭️"; return; }
 
+  # Read package.json with Python, or Node if Python is missing (common on Windows).
+  # The path is passed as an argument, never pasted into the code.
+  local -a json_reader=()
+  if [[ -n "$PYTHON" ]]; then
+    json_reader=("$PYTHON" -c '
+import json, sys
+try:
+    s = json.load(open(sys.argv[1], encoding="utf-8")).get("scripts", {})
+    for k in ("postinstall", "preinstall"):
+        if k in s:
+            print(f"{k}: {s[k]}")
+except Exception:
+    pass
+')
+  elif command -v node &>/dev/null; then
+    json_reader=(node -e '
+try {
+  const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).scripts || {};
+  for (const k of ["postinstall", "preinstall"]) if (k in s) console.log(k + ": " + s[k]);
+} catch (e) {}
+')
+  else
+    pass "python3 and node not available — skipped"
+    record "postinstall" "⏭️"
+    return
+  fi
+
   local found=0
   for dir in "${RESOLVED_DIRS[@]}"; do
     while IFS= read -r pkg; do
       [[ -z "$pkg" ]] && continue
       local scripts
-      scripts=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$pkg'))
-    s = d.get('scripts', {})
-    for k in ('postinstall', 'preinstall'):
-        if k in s:
-            print(f'{k}: {s[k]}')
-except: pass
-" 2>/dev/null || true)
+      scripts=$("${json_reader[@]}" "$pkg" 2>/dev/null | tr -d '\r' || true)
 
       if [[ -n "$scripts" ]]; then
         while IFS= read -r script_line; do
@@ -479,10 +566,11 @@ check_propagation_artifacts() {
       \( -name 'temp_auto_push.bat' -o -name 'config.bat' \) \
       -print 2>/dev/null || true)
     if [[ -n "$bats" ]]; then
-      echo "$bats" | while IFS= read -r f; do
+      while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
         warn "Propagation artifact: $f"
         found=$((found + 1))
-      done
+      done <<< "$bats"
     fi
   done
 
@@ -492,10 +580,11 @@ check_propagation_artifacts() {
     'config\.bat' \
     "${RESOLVED_DIRS[@]}" 2>/dev/null || true)
   if [[ -n "$gitignore_refs" ]]; then
-    echo "$gitignore_refs" | while IFS= read -r f; do
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
       warn "config.bat in .gitignore: $f"
       found=$((found + 1))
-    done
+    done <<< "$gitignore_refs"
   fi
 
   if [[ $found -eq 0 ]]; then
@@ -661,19 +750,51 @@ check_persistence() {
     fi
   fi
 
-  local cron
-  cron=$(crontab -l 2>/dev/null || true)
-  if [[ -n "$cron" ]]; then
-    printf "       ${DIM}Crontab:${NC}\n"
-    echo "$cron" | while IFS= read -r line; do detail "$line"; done
+  if $IS_LINUX; then
+    local autostart="$HOME/.config/autostart" units
+    if [[ -d "$autostart" ]] && [[ -n "$(ls -A "$autostart" 2>/dev/null)" ]]; then
+      printf "       ${DIM}Autostart entries (~/.config/autostart):${NC}\n"
+      ls "$autostart" 2>/dev/null | while IFS= read -r f; do detail "$f"; done
+    fi
+    units=$(ls "$HOME/.config/systemd/user" 2>/dev/null | grep -E '\.(service|timer)$' || true)
+    if [[ -n "$units" ]]; then
+      printf "       ${DIM}systemd user units (~/.config/systemd/user):${NC}\n"
+      echo "$units" | while IFS= read -r f; do detail "$f"; done
+    fi
+  fi
+
+  if $IS_WINDOWS; then
+    local startup="" run_keys
+    [[ -n "${APPDATA:-}" ]] && startup="$(cygpath -u "$APPDATA" 2>/dev/null || echo "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
+    if [[ -n "$startup" && -d "$startup" ]] && [[ -n "$(ls -A "$startup" 2>/dev/null | grep -v '^desktop\.ini$')" ]]; then
+      printf "       ${DIM}Startup folder:${NC}\n"
+      ls "$startup" 2>/dev/null | grep -v '^desktop\.ini$' | while IFS= read -r f; do detail "$f"; done
+    else
+      detail "Startup folder: (empty)"
+    fi
+    run_keys=$(reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run' 2>/dev/null | tr -d '\r' | \
+      grep -E '^[[:space:]]+[^[:space:]]' || true)
+    if [[ -n "$run_keys" ]]; then
+      printf "       ${DIM}Registry Run key (HKCU):${NC}\n"
+      echo "$run_keys" | while IFS= read -r line; do detail "$line"; done
+    else
+      detail "Registry Run key (HKCU): (empty)"
+    fi
   else
-    detail "Crontab: (empty)"
+    local cron
+    cron=$(crontab -l 2>/dev/null || true)
+    if [[ -n "$cron" ]]; then
+      printf "       ${DIM}Crontab:${NC}\n"
+      echo "$cron" | while IFS= read -r line; do detail "$line"; done
+    else
+      detail "Crontab: (empty)"
+    fi
   fi
 
   printf "       ${DIM}Suspicious processes (node/npm/python, excluding IDE):${NC}\n"
   local procs
-  procs=$(ps aux 2>/dev/null | grep -iE 'node|npm|npx|python' | \
-    grep -viE 'grep|Claude|cursor|vscode|Code Helper|Electron|copilot|eslint_d' || true)
+  procs=$(list_processes | grep -iE 'node|npm|npx|python' | \
+    grep -viE 'grep|Claude|cursor|vscode|Microsoft VS Code|Code Helper|Electron|copilot|eslint_d' || true)
   if [[ -n "$procs" ]]; then
     echo "$procs" | while IFS= read -r line; do detail "$line"; done
     # Check for known malware patterns in process list
@@ -697,11 +818,14 @@ check_persistence() {
   done
 
   # RAT binary drop
-  if [[ -f "/tmp/0001.dat" ]]; then
-    fail "RAT BINARY DROP: /tmp/0001.dat"
-    detail "$(ls -la /tmp/0001.dat 2>/dev/null)"
-    found=$((found + 1))
-  fi
+  local t
+  for t in "${TEMP_DIRS[@]}"; do
+    if [[ -f "$t/0001.dat" ]]; then
+      fail "RAT BINARY DROP: $t/0001.dat"
+      detail "$(ls -la "$t/0001.dat" 2>/dev/null)"
+      found=$((found + 1))
+    fi
+  done
 
   if [[ $found -gt 0 ]]; then
     record "Persistence" "🔴"
@@ -725,11 +849,12 @@ check_embedded_tools() {
       \( -name 'trufflehog*' -o -name 'gitleaks*' -o -name 'detect-secrets*' \) \
       -type f -print 2>/dev/null || true)
     if [[ -n "$hits" ]]; then
-      echo "$hits" | while IFS= read -r f; do
+      while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
         warn "Embedded scanning tool: $f"
         detail "$(ls -la "$f" 2>/dev/null)"
         found=$((found + 1))
-      done
+      done <<< "$hits"
     fi
   done
 
@@ -755,14 +880,15 @@ check_create_require() {
 
   if [[ -n "$hits" ]]; then
     local suspicious=0
-    echo "$hits" | while IFS= read -r f; do
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
       if echo "$f" | grep -qiE '\.config\.|scripts/|bin/|cli|build|webpack|rollup|vite|esbuild|tsup'; then
         detail "Expected (tooling): $f"
       else
         warn "Suspicious createRequire: $f"
         suspicious=$((suspicious + 1))
       fi
-    done
+    done <<< "$hits"
     if [[ $suspicious -eq 0 ]]; then
       pass "createRequire found only in expected tooling files"
       record "createRequire" "✅"
@@ -790,9 +916,15 @@ check_ssh_keys() {
   local found=0
 
   # Permission checks only on Linux/macOS
-  if [[ "$OSTYPE" != msys* && "$OSTYPE" != cygwin* && "$OSTYPE" != win32* ]]; then
+  if ! $IS_WINDOWS; then
     local dir_perms
-    dir_perms=$(stat -f '%Lp' "$ssh_dir" 2>/dev/null || stat -c '%a' "$ssh_dir" 2>/dev/null || echo "unknown")
+    # BSD stat (-f) on macOS; GNU stat (-c) on Linux. On GNU, "stat -f" means filesystem
+    # status and prints unrelated output, so never try both.
+    if $IS_MAC; then
+      dir_perms=$(stat -f '%Lp' "$ssh_dir" 2>/dev/null || echo "unknown")
+    else
+      dir_perms=$(stat -c '%a' "$ssh_dir" 2>/dev/null || echo "unknown")
+    fi
 
     if [[ "$dir_perms" != "700" ]] && [[ "$dir_perms" != "unknown" ]]; then
       warn "~/.ssh permissions are $dir_perms (expected 700)"
@@ -826,22 +958,23 @@ check_ssh_keys() {
   #   Linux/GNU  : date -d '24 hours ago'
   #   Git Bash   : date -d '24 hours ago'  (same as GNU, usually works)
   local recent_threshold
-  if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* || "$OSTYPE" == win32* ]]; then
-    recent_threshold=$(date -d '24 hours ago' '+%s' 2>/dev/null || echo "0")
+  if $IS_MAC; then
+    recent_threshold=$(date -v-24H '+%s' 2>/dev/null || echo "0")
   else
-    recent_threshold=$(date -v-24H '+%s' 2>/dev/null || date -d '24 hours ago' '+%s' 2>/dev/null || echo "0")
+    recent_threshold=$(date -d '24 hours ago' '+%s' 2>/dev/null || echo "0")
   fi
 
   while IFS= read -r file; do
     [[ -z "$file" || ! -r "$file" ]] && continue
+    [[ "$(basename "$file")" == ".DS_Store" ]] && continue   # written by macOS Finder
 
     local mtime mtime_human
 
-    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* || "$OSTYPE" == win32* ]]; then
+    if $IS_WINDOWS; then
       # Git Bash / MSYS2 / Cygwin — use date -r, avoid broken stat
       mtime=$(date -r "$file" '+%s' 2>/dev/null || echo "0")
       mtime_human=$(date -r "$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown")
-    elif [[ "$(uname)" == "Darwin" ]]; then
+    elif $IS_MAC; then
       # macOS / BSD stat
       mtime=$(stat -f '%m' "$file" 2>/dev/null || echo "0")
       mtime_human=$(stat -f '%Sm' "$file" 2>/dev/null || echo "unknown")
@@ -857,7 +990,7 @@ check_ssh_keys() {
       warn "RECENTLY MODIFIED (last 24h): $file"
       found=$((found + 1))
     fi
-  done < <(find "$ssh_dir" -maxdepth 1 -type f -readable 2>/dev/null)
+  done < <(find "$ssh_dir" -maxdepth 1 -type f 2>/dev/null)   # -readable is GNU-only; the loop checks -r
 
   if [[ $found -eq 0 ]]; then
     pass "SSH key state looks normal"
@@ -1073,9 +1206,18 @@ for my $f (@ARGV) {
       my $vis = qr/[^\x00-\x7F\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FE00}-\x{FE0F}\x{E000}-\x{F8FF}\p{Cf}]/;
       if ($cp == 0x200D && $prev ne "" && $next ne "") {
         next if ($prev =~ $vis || $prev =~ /[\x{FE0E}\x{FE0F}]/) && $next =~ $vis;
-      } elsif (($cp == 0xFE0E || $cp == 0xFE0F) && $prev ne "") {
-        next if $prev =~ $vis;
-        next if $prev =~ /[0-9#*]/ && $next eq "\x{20E3}";
+      } elsif ($cp == 0xFE0E || $cp == 0xFE0F) {
+        # Emoji/text style selector after an icon such as ⚠️. Also allow a doubled selector
+        # (copy-paste artifact, e.g. ⚠️️) and an escaped icon followed by a literal selector
+        # ("\u26a0️", "&#x26a0;️"). Longer runs are still reported (Glassworm payloads).
+        my $j = $i - 1; my $run = 1;
+        while ($j >= 0 && substr($line, $j, 1) =~ /[\x{FE0E}\x{FE0F}]/) { $run++; $j--; }
+        my $base = $j >= 0 ? substr($line, $j, 1) : "";
+        if ($run <= 2 && $base ne "") {
+          next if $base =~ $vis;
+          next if $run == 1 && $base =~ /[0-9#*]/ && $next eq "\x{20E3}";
+          next if substr($line, 0, $j + 1) =~ /(?:\\u\{?0*26a0\}?|\\x\{26a0\}|&#9888;|&#x0*26a0;)$/i;
+        }
       }
       $count++;
       $first = sprintf("line %d col %d U+%04X", $ln, $i + 1, $cp) unless $first;
@@ -1202,8 +1344,9 @@ PERL
 check_vscode_autorun_tasks() {
   header "VS Code tasks.json auto-run / disguised payloads"
   [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "tasks.json auto-run" "⏭️"; return; }
-  if ! command -v python3 &>/dev/null; then
-    pass "python3 not available — skipped"
+  if [[ -z "$PYTHON" ]]; then
+    info "python3 not available — tasks.json auto-run check could not run"
+    detail "Install Python 3 and run the scan again to cover this check"
     record "tasks.json auto-run" "⏭️"
     return
   fi
@@ -1274,7 +1417,7 @@ PY
   local dir
   for dir in "${RESOLVED_DIRS[@]}"; do
     hits+=$(find "$dir" -maxdepth "$MAX_DEPTH" "${FIND_PRUNE[@]}" -type f -path '*/.vscode/tasks.json' \
-      -print0 2>/dev/null | xargs -0 python3 -c "$py_script" 2>/dev/null || true)
+      -print0 2>/dev/null | xargs -0 "$PYTHON" -c "$py_script" 2>/dev/null | tr -d '\r' || true)
     hits+=$'\n'
   done
 
@@ -1303,36 +1446,15 @@ PY
   record "tasks.json auto-run" "$status"
 }
 
-# 33. Git history — malware on any branch, and commits with author/committer date skew
-#
-# Strong PolinRider markers only (low false-positive rate), checked in JS/TS files:
-#   rmcej%otb, global['_V']='8-..', global['!']='9-..', var _$_1e42=(function
-GIT_IOC='rmcej.{0,5}otb|global\[.{0,3}_V.{0,3}\][[:space:]]*=[[:space:]]*.{0,3}8-|global\[.!.\][[:space:]]*=[[:space:]]*.[0-9]+-|_\$_[a-f0-9]{4}=\(function'
-GIT_CODE_PATHS=('*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.tsx' ':!*node_modules/*' ':!*.min.js')
-
-# Print tab-separated rows from stdin as an aligned table with the given 4 headers.
-# Optional 5th field is a marker (e.g. 🔴) shown at the start of the row.
-git_table() {
-  local fmt="       %s %-34s %-34s %-32s %s\n"
-  local r b f s m
-  printf "\n${BOLD}${fmt}${NC}" "  " "$1" "$2" "$3" "$4"
-  printf "$fmt" "  " "----" "------" "----" "------"
-  while IFS=$'\t' read -r r b f s m; do
-    [[ -z "$r" ]] && continue
-    [[ -z "$m" ]] && m="  "
-    printf "$fmt" "$m" "$(git_trunc "$r" 34)" "$(git_trunc "$b" 34)" "$(git_trunc "$f" 32)" "$s"
-  done
-  printf "\n"
-}
-
-# Shorten long values from the left so the end of a path/branch stays visible.
-git_trunc() {
-  local s="$1" n="$2"
-  if [[ ${#s} -gt $n ]]; then echo "...${s: -$((n - 3))}"; else echo "$s"; fi
-}
+# 33. Git history — commits with author/committer date skew
+# Same check as Operation-PolinRider scripts/scan-git-dates.py (src/polinrider_guard/git_dates.py):
+# run "git log --all" and report commits whose author and committer dates differ by more than
+# GIT_SKEW_HOURS. Informational only (👀): never counted as a finding. A failed "git log" is
+# listed too, so a repo git refuses to open is not silently shown as clean.
+GIT_SKEW_HOURS=24
 
 check_git_history() {
-  header "Git history: malware on branches + date skew (>24h)"
+  header "Git history: author/committer date skew (>${GIT_SKEW_HOURS}h)"
   [[ ${#RESOLVED_DIRS[@]} -eq 0 ]] && { pass "No directories to scan"; record "Git history" "⏭️"; return; }
   if ! command -v git &>/dev/null; then
     pass "git not available — skipped"
@@ -1340,110 +1462,49 @@ check_git_history() {
     return
   fi
 
-  printf "       ${DIM}Checking every branch of every repo — this may take a minute...${NC}\n"
-
-  # Rows are tab-separated: repo<TAB>branch<TAB>file<TAB>status
-  local active="" history="" skew_rows=""
-  local repo_count=0 branch_count=0
-  local dir gitpath repo short ref name f h n mal first skewed branches
-  local -a files
+  local dir gitpath repo short out skewed n
+  local tilde='~' repo_count=0 found=0 failed=0
 
   for dir in "${RESOLVED_DIRS[@]}"; do
     while IFS= read -r gitpath; do
       [[ -z "$gitpath" ]] && continue
       repo=$(dirname "$gitpath")
-      short="${repo/#$HOME/~}"
+      short="${repo/#"$HOME"/$tilde}"
       repo_count=$((repo_count + 1))
 
-      # a) Malware in the latest commit of every local and remote branch
-      while IFS= read -r ref; do
-        [[ -z "$ref" || "$ref" == */HEAD ]] && continue
-        branch_count=$((branch_count + 1))
-        name="${ref#refs/heads/}"; name="${name#refs/remotes/}"
-        while IFS= read -r f; do
-          [[ -z "$f" ]] && continue
-          active+="$short"$'\t'"$name"$'\t'"${f#"$ref":}"$'\t'"ACTIVE"$'\t'"🔴"$'\n'
-        done < <(git -C "$repo" grep -lE "$GIT_IOC" "$ref" -- "${GIT_CODE_PATHS[@]}" 2>/dev/null)
-      done < <(git -C "$repo" for-each-ref --format='%(refname)' refs/heads refs/remotes 2>/dev/null)
+      # hash, author, author time, committer time, author date, committer date, subject
+      if ! out=$(git -C "$repo" log --all --pretty=format:'%H%x09%an%x09%at%x09%ct%x09%aI%x09%cI%x09%s' 2>&1); then
+        info "git log failed: $short"
+        detail "$(echo "$out" | tr -d '\r' | head -1)"
+        failed=$((failed + 1))
+        continue
+      fi
 
-      # b) Commits with >24h author/committer date skew, and malware inside them
-      skewed=$(git -C "$repo" log --all --pretty=format:'%H %at %ct' 2>/dev/null | \
-        awk '{ d = $3 - $2; if (d < 0) d = -d; if (d > 86400) print $1 }')
+      skewed=$(echo "$out" | tr -d '\r' | awk -F'\t' -v limit=$((GIT_SKEW_HOURS * 3600)) '
+        NF >= 7 {
+          d = $4 - $3; if (d < 0) d = -d
+          if (d > limit) printf "%s  %s -> %s  (%.1fh)  %s: %s\n", substr($1, 1, 12), $5, $6, d / 3600, $2, $7
+        }')
       [[ -z "$skewed" ]] && continue
+
       n=$(echo "$skewed" | wc -l | tr -d ' ')
-      first=$(echo "$skewed" | head -1 | cut -c1-8)
-      mal=0
-      while IFS= read -r h; do
-        [[ -z "$h" ]] && continue
-        files=()
-        while IFS= read -r f; do
-          [[ -n "$f" ]] && files+=("$f")
-        done < <(git -C "$repo" diff-tree -r -m --no-commit-id --name-only --root "$h" 2>/dev/null | \
-          grep -E '\.(js|mjs|cjs|jsx|ts|tsx)$' | grep -v 'node_modules/' | sort -u)
-        [[ ${#files[@]} -eq 0 ]] && continue
-        local hit=0
-        while IFS= read -r f; do
-          [[ -z "$f" ]] && continue
-          f="${f#"$h":}"
-          hit=1
-          # Already reported as ACTIVE on a branch, or already listed from another commit? Skip.
-          if printf '%s' "$active$history" | awk -F'\t' -v r="$short" -v p="$f" \
-               '$1 == r && $3 == p { found = 1 } END { exit !found }'; then
-            continue
-          fi
-          branches=$(git -C "$repo" for-each-ref --contains "$h" --format='%(refname)' refs/heads refs/remotes 2>/dev/null | \
-            grep -v '/HEAD$' | sed -e 's#^refs/heads/##' -e 's#^refs/remotes/##')
-          name=$(echo "$branches" | head -1)
-          local others
-          others=$(echo "$branches" | grep -c . || true)
-          [[ -z "$name" ]] && name="(no branch)"
-          [[ "$others" -gt 1 ]] && name="$name (+$((others - 1)) more)"
-          history+="$short"$'\t'"$name"$'\t'"$f"$'\t'"REMOVED, in commit ${h:0:8}"$'\t'"🔴"$'\n'
-        done < <(git -C "$repo" grep -lE "$GIT_IOC" "$h" -- "${files[@]}" 2>/dev/null)
-        mal=$((mal + hit))
-      done <<< "$skewed"
-      local mark=""
-      [[ $mal -gt 0 ]] && mark="🔴"
-      skew_rows+="$short"$'\t'"$n"$'\t'"$mal"$'\t'"$first"$'\t'"$mark"$'\n'
+      info "$short — $n commit(s) with author/committer date skew > ${GIT_SKEW_HOURS}h"
+      echo "$skewed" | head -10 | while IFS= read -r line; do detail "$line"; done
+      [[ $n -gt 10 ]] && detail "... and $((n - 10)) more"
+      found=$((found + 1))
     done < <(find "$dir" -maxdepth "$MAX_DEPTH" "${FIND_PRUNE_NOGIT[@]}" -name .git -print -prune 2>/dev/null)
   done
 
-  active=$(printf '%s' "$active" | grep -v '^$' || true)
-  history=$(printf '%s' "$history" | grep -v '^$' || true)
-  skew_rows=$(printf '%s' "$skew_rows" | grep -v '^$' || true)
-  local status="✅" count
-
-  if [[ -n "$active" ]]; then
-    count=$(echo "$active" | awk -F'\t' '{ print $1 "\t" $2 }' | sort -u | wc -l | tr -d ' ')
-    fail "MALWARE CODE ON $count BRANCH(ES) — checking out + running npm will execute it"
-    git_table "Repo" "Branch" "File" "Status" <<< "$active"
-    detail "Delete or clean these branches on the remote, and tell your security lead"
-    status="🔴"
+  if [[ $found -gt 0 || $failed -gt 0 ]]; then
+    if [[ $found -gt 0 ]]; then
+      detail "For information only. Usually a rebase, cherry-pick or late merge — check by hand if unexpected."
+      detail "Inspect with: git -C <repo> log --all --format='%h %ad | %cd %an %s' --date=iso"
+    fi
+    record "Git history" "👀"
+  else
+    pass "No commits with >${GIT_SKEW_HOURS}h date skew in $repo_count repo(s)"
+    record "Git history" "✅"
   fi
-
-  if [[ -n "$history" ]]; then
-    count=$(echo "$history" | wc -l | tr -d ' ')
-    warn "Malware in $count file(s) of old commits — removed from branches, still in git history"
-    git_table "Repo" "Branch" "File" "Status" <<< "$history"
-    detail "Harmless unless someone checks out that old commit. Rewriting history is a team decision."
-    [[ "$status" == "✅" ]] && status="⚠️"
-  fi
-
-  if [[ -n "$skew_rows" ]]; then
-    count=$(echo "$skew_rows" | wc -l | tr -d ' ')
-    info "$count of $repo_count repo(s) have commits with >24h author/committer date skew"
-    git_table "Repo" "Skewed commits" "With malware" "Example" <<< "$skew_rows"
-    detail "Skew without malware is usually a rebase, cherry-pick or late PR merge"
-    detail "Inspect with: git -C <repo> log --all --format='%h %ad | %cd %an %s' --date=iso"
-    [[ "$status" == "✅" ]] && status="👀"
-  fi
-
-  if [[ "$status" == "✅" ]]; then
-    pass "No malware in $branch_count branch(es) across $repo_count repo(s), and no date skew"
-  elif [[ -z "$active" ]]; then
-    pass "No malware in the latest code of $branch_count branch(es) across $repo_count repo(s)"
-  fi
-  record "Git history" "$status"
 }
 
 # ─── Deep checks (macOS only, slow) ──────────────────────────────────────────
