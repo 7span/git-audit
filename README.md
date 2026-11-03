@@ -8,7 +8,7 @@ A quick check that looks for harmful software on your work computer. It only rea
 2. Paste this line, then press Enter:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/7span/git-audit/main/supply-chain-scanner.sh -o /tmp/scan.sh && bash /tmp/scan.sh
+curl -fsSL https://raw.githubusercontent.com/7span/git-audit/v1.1.0/supply-chain-scanner.sh -o /tmp/scan.sh && bash /tmp/scan.sh
 ```
 
 3. Wait a few minutes. The result appears on the screen.
