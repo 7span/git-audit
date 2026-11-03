@@ -10,7 +10,7 @@ It only reads. It never changes or deletes anything on your computer.
 2. Paste this line and press Enter.
 
 ```
-curl -fsSL https://raw.githubusercontent.com/7span/git-audit/main/supply-chain-scanner.sh -o /tmp/scan.sh && bash /tmp/scan.sh
+curl -fsSL https://raw.githubusercontent.com/7span/git-audit/main/index.py -o /tmp/scan.sh && bash /tmp/scan.sh
 ```
 
 3. Wait a few minutes. The result appears on the screen.
